@@ -568,7 +568,7 @@ class Consolidator:
             if not chunk:
                 return
 
-            logger.info(
+            logger.debug(
                 "Eager consolidation for {}: summarizing {} messages ({}→{})",
                 session.key, len(chunk), start, end,
             )
@@ -577,7 +577,7 @@ class Consolidator:
                 session.last_eager_consolidated = end
                 self._eager_last_run[session.key] = datetime.now()
                 self.sessions.save(session)
-                logger.info(
+                logger.debug(
                     "Eager consolidation done for {}: cursor now at {}",
                     session.key, end,
                 )
