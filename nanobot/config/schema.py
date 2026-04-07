@@ -45,6 +45,24 @@ class DreamConfig(Base):
     max_batch_size: int = Field(default=20, ge=1)  # Max history entries per run
     max_iterations: int = Field(default=10, ge=1)  # Max tool calls per Phase 2
 
+    # Eager consolidation settings
+    eager_consolidation: bool = Field(
+        default=False,
+        description="Enable eager (proactive) consolidation after each response",
+    )
+    eager_min_messages: int = Field(
+        default=3, ge=1,
+        description="Minimum new messages before eager consolidation runs",
+    )
+    eager_min_interval_s: int = Field(
+        default=120, ge=0,
+        description="Minimum seconds between eager consolidation runs per session",
+    )
+    eager_max_batch: int = Field(
+        default=20, ge=1,
+        description="Maximum messages per eager consolidation batch",
+    )
+
     def build_schedule(self, timezone: str) -> CronSchedule:
         """Build the runtime schedule, preferring the legacy cron override if present."""
         if self.cron:

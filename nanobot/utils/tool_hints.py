@@ -25,6 +25,40 @@ _PATH_IN_CMD_RE = re.compile(
 )
 
 
+def _scrub_command(val: str, max_len: int = 50) -> str:
+    """Abbreviate paths inside shell commands and truncate to max_len.
+
+    Replaces absolute paths (especially the user's home/workspace) with
+    abbreviated forms, then truncates the whole command if still too long.
+    """
+    home = os.path.expanduser("~").replace("\\", "/")
+
+    def _replace_path(m: re.Match) -> str:
+        p = m.group(0).replace("\\", "/")
+        if p.startswith(home + "/"):
+            p = "~" + p[len(home):]
+        elif p == home:
+            p = "~"
+        return abbreviate_path(p, max_len=20)
+
+    # Match Windows paths: drive letter + :\ + path until space/&&/||/;|>
+    val = re.sub(
+        r'[A-Za-z]:[\\/][^\s&|;>]+',
+        _replace_path,
+        val,
+    )
+    # Match Unix absolute paths: /... until space/&&/||/;|>
+    val = re.sub(
+        r'(?<![\'"])/(?:[^\s/&|;>]+/)?[^\s/&|;>]+',
+        _replace_path,
+        val,
+    )
+
+    if len(val) > max_len:
+        return val[:max_len - 1] + "\u2026"
+    return val
+
+
 def format_tool_hints(tool_calls: list) -> str:
     """Format tool calls as concise hints with smart abbreviation."""
     if not tool_calls:
