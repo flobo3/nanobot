@@ -180,6 +180,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
         hooks: list[AgentHook] | None = None,
+        dream_config: Any | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -240,6 +241,15 @@ class AgentLoop:
         self._concurrency_gate: asyncio.Semaphore | None = (
             asyncio.Semaphore(_max) if _max > 0 else None
         )
+        # Build eager consolidation config from dream settings (getattr for backward compat)
+        _dc = dream_config or defaults.dream
+        _eager_config = {
+            "enabled": getattr(_dc, "eager_consolidation", False),
+            "min_messages": getattr(_dc, "eager_min_messages", 3),
+            "min_interval_s": getattr(_dc, "eager_min_interval_s", 120),
+            "max_batch": getattr(_dc, "eager_max_batch", 20),
+        }
+
         self.consolidator = Consolidator(
             store=self.context.memory,
             provider=provider,
@@ -249,6 +259,7 @@ class AgentLoop:
             build_messages=self.context.build_messages,
             get_tool_definitions=self.tools.get_definitions,
             max_completion_tokens=provider.generation.max_tokens,
+            eager_config=_eager_config,
         )
         self.dream = Dream(
             store=self.context.memory,
@@ -598,6 +609,7 @@ class AgentLoop:
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
         self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
+        self._schedule_background(self.consolidator.maybe_eager_consolidate(session))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None

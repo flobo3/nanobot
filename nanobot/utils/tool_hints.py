@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import re
+
 from nanobot.utils.path import abbreviate_path
 
 # Registry: tool_name -> (key_args, template, is_path, is_command)
@@ -16,6 +19,40 @@ _TOOL_FORMATS: dict[str, tuple[list[str], str, bool, bool]] = {
     "web_fetch":  (["url"],                            "fetch {}",    True,  False),
     "list_dir":   (["path"],                           "ls {}",       True,  False),
 }
+
+
+def _scrub_command(val: str, max_len: int = 50) -> str:
+    """Abbreviate paths inside shell commands and truncate to max_len.
+
+    Replaces absolute paths (especially the user's home/workspace) with
+    abbreviated forms, then truncates the whole command if still too long.
+    """
+    home = os.path.expanduser("~").replace("\\", "/")
+
+    def _replace_path(m: re.Match) -> str:
+        p = m.group(0).replace("\\", "/")
+        if p.startswith(home + "/"):
+            p = "~" + p[len(home):]
+        elif p == home:
+            p = "~"
+        return abbreviate_path(p, max_len=20)
+
+    # Match Windows paths: drive letter + :\ + path until space/&&/||/;|>
+    val = re.sub(
+        r'[A-Za-z]:[\\/][^\s&|;>]+',
+        _replace_path,
+        val,
+    )
+    # Match Unix absolute paths: /... until space/&&/||/;|>
+    val = re.sub(
+        r'(?<![\'"])/(?:[^\s/&|;>]+/)?[^\s/&|;>]+',
+        _replace_path,
+        val,
+    )
+
+    if len(val) > max_len:
+        return val[:max_len - 1] + "\u2026"
+    return val
 
 
 def format_tool_hints(tool_calls: list) -> str:
@@ -85,7 +122,7 @@ def _fmt_known(tc, fmt: tuple) -> str:
     if fmt[2]:  # is_path
         val = abbreviate_path(val)
     elif fmt[3]:  # is_command
-        val = val[:40] + "\u2026" if len(val) > 40 else val
+        val = _scrub_command(val)
     return fmt[1].format(val)
 
 
