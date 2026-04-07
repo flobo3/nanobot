@@ -377,6 +377,7 @@ class Consolidator:
         build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         max_completion_tokens: int = 4096,
+        eager_config: dict[str, Any] | None = None,
     ):
         self.store = store
         self.provider = provider
@@ -389,6 +390,12 @@ class Consolidator:
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
+        # Eager consolidation
+        self._eager_enabled = (eager_config or {}).get("enabled", False)
+        self._eager_min_messages = (eager_config or {}).get("min_messages", 3)
+        self._eager_min_interval_s = (eager_config or {}).get("min_interval_s", 120)
+        self._eager_max_batch = (eager_config or {}).get("max_batch", 20)
+        self._eager_last_run: dict[str, datetime] = {}  # session_key -> timestamp
 
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
@@ -594,6 +601,75 @@ class Consolidator:
                     "last_active": session.updated_at.isoformat(),
                 }
                 self.sessions.save(session)
+
+    # -- Eager (proactive) consolidation ------------------------------------
+
+    async def maybe_eager_consolidate(self, session: Session) -> None:
+        """After-response GC: summarize new messages into history.jsonl
+        without touching the session's actual message list or last_consolidated.
+
+        This ensures that short conversations (which never overflow the token
+        budget) still get archived into history.jsonl so that Dream and future
+        semantic search can see them.
+        """
+        if not self._eager_enabled:
+            return
+        if not session.messages:
+            return
+
+        # Throttle by time: skip if last eager run was too recent
+        now = datetime.now()
+        last_run = self._eager_last_run.get(session.key)
+        if last_run and self._eager_min_interval_s > 0:
+            elapsed = (now - last_run).total_seconds()
+            if elapsed < self._eager_min_interval_s:
+                logger.debug(
+                    "Eager consolidation throttled for {}: {:.0f}s < {}s",
+                    session.key, elapsed, self._eager_min_interval_s,
+                )
+                return
+
+        start = session.last_eager_consolidated
+        end = len(session.messages)
+        new_count = end - start
+
+        if new_count < self._eager_min_messages:
+            return
+
+        lock = self.get_lock(session.key)
+        async with lock:
+            # Re-read under lock (values may have changed)
+            start = session.last_eager_consolidated
+            end = len(session.messages)
+            new_count = end - start
+            if new_count < self._eager_min_messages:
+                return
+
+            # Cap batch size — only summarize the oldest eager_max_batch messages
+            if new_count > self._eager_max_batch:
+                end = start + self._eager_max_batch
+
+            chunk = session.messages[start:end]
+            if not chunk:
+                return
+
+            logger.info(
+                "Eager consolidation for {}: summarizing {} messages ({}→{})",
+                session.key, len(chunk), start, end,
+            )
+
+            if await self.archive(chunk):
+                session.last_eager_consolidated = end
+                self._eager_last_run[session.key] = datetime.now()
+                self.sessions.save(session)
+                logger.info(
+                    "Eager consolidation done for {}: cursor now at {}",
+                    session.key, end,
+                )
+            else:
+                logger.warning(
+                    "Eager consolidation archive failed for {}", session.key,
+                )
 
 
 # ---------------------------------------------------------------------------

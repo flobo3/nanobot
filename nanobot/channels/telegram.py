@@ -410,19 +410,17 @@ class TelegramChannel(BaseChannel):
                 except ValueError:
                     pass
 
+        # Resolve thread_id from chat_id format or metadata
         try:
-            chat_id = int(msg.chat_id)
+            chat_id, message_thread_id = self._resolve_thread_id(msg.chat_id, msg.metadata)
         except ValueError:
             logger.error("Invalid chat_id: {}", msg.chat_id)
             return
-        reply_to_message_id = msg.metadata.get("message_id")
-        message_thread_id = msg.metadata.get("message_thread_id")
-        if message_thread_id is None and reply_to_message_id is not None:
-            message_thread_id = self._message_threads.get((msg.chat_id, reply_to_message_id))
         thread_kwargs = {}
         if message_thread_id is not None:
             thread_kwargs["message_thread_id"] = message_thread_id
 
+        reply_to_message_id = msg.metadata.get("message_id")
         reply_params = None
         if self.config.reply_to_message:
             if reply_to_message_id:
@@ -542,6 +540,39 @@ class TelegramChannel(BaseChannel):
                 logger.error("Error sending Telegram message: {}", e2)
                 raise
 
+    def _resolve_thread_id(self, chat_id: str, metadata: dict[str, Any] | None = None) -> tuple[int, int | None]:
+        """Parse chat_id and extract thread_id from chat_id format or metadata.
+        
+        Returns (int_chat_id, message_thread_id_or_None).
+        """
+        raw_chat_id = str(chat_id)
+        message_thread_id = (metadata or {}).get("message_thread_id")
+
+        if ":topic:" in raw_chat_id:
+            parts = raw_chat_id.split(":topic:")
+            raw_chat_id = parts[0]
+            message_thread_id = int(parts[1])
+        elif "_" in raw_chat_id:
+            parts = raw_chat_id.split("_")
+            if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+                raw_chat_id = parts[0]
+                message_thread_id = int(parts[1])
+        elif ":" in raw_chat_id:
+            parts = raw_chat_id.split(":")
+            if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+                raw_chat_id = parts[0]
+                message_thread_id = int(parts[1])
+
+        int_chat_id = int(raw_chat_id)
+
+        # Fallback: resolve thread from reply-to mapping
+        if message_thread_id is None:
+            reply_to = (metadata or {}).get("message_id")
+            if reply_to is not None:
+                message_thread_id = self._message_threads.get((chat_id, reply_to))
+
+        return int_chat_id, message_thread_id
+
     @staticmethod
     def _is_not_modified_error(exc: Exception) -> bool:
         return isinstance(exc, BadRequest) and "message is not modified" in str(exc).lower()
@@ -551,8 +582,21 @@ class TelegramChannel(BaseChannel):
         if not self._app:
             return
         meta = metadata or {}
-        int_chat_id = int(chat_id)
         stream_id = meta.get("_stream_id")
+
+        int_chat_id, thread_id = self._resolve_thread_id(chat_id, metadata)
+        thread_kwargs = {}
+        if thread_id is not None:
+            thread_kwargs["message_thread_id"] = thread_id
+
+        # Resolve reply_to for the initial stream message
+        reply_params = None
+        reply_to_message_id = meta.get("message_id")
+        if reply_to_message_id and self.config.reply_to_message:
+            reply_params = ReplyParameters(
+                message_id=reply_to_message_id,
+                allow_sending_without_reply=True
+            )
 
         if meta.get("_stream_end"):
             buf = self._stream_bufs.get(chat_id)
@@ -641,6 +685,7 @@ class TelegramChannel(BaseChannel):
                 sent = await self._call_with_retry(
                     self._app.bot.send_message,
                     chat_id=int_chat_id, text=buf.text,
+                    reply_parameters=reply_params,
                     **thread_kwargs,
                 )
                 buf.message_id = sent.message_id
