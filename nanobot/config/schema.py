@@ -173,7 +173,7 @@ class WebSearchConfig(Base):
 
     provider: str = "duckduckgo"  # brave, tavily, duckduckgo, searxng, jina
     api_key: str = ""
-    base_url: str = ""  # SearXNG base URL
+    base_url: str = ""  # SearXNG / Tavily base URL (env: TAVILY_BASE_URL)
     max_results: int = 5
     timeout: int = 30  # Wall-clock timeout (seconds) for search operations
 
