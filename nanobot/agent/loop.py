@@ -295,6 +295,7 @@ class AgentLoop:
         restart_mode: str = "auto",
         local_trigger_store: LocalTriggerStore | None = None,
         idle_compact_check_interval_seconds: int = 0,
+        eager_config: dict[str, Any] | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -443,6 +444,7 @@ class AgentLoop:
             get_tool_definitions=self.tools.get_definitions,
             consolidation_ratio=consolidation_ratio,
             unified_session=unified_session,
+            eager_config=eager_config,
         )
         self.auto_compact = AutoCompact(
             sessions=self.sessions,
@@ -521,6 +523,12 @@ class AgentLoop:
             model_presets=preset_helpers.configured_model_presets(config),
             model_preset=defaults.model_preset,
             dream_model_preset=defaults.dream.model_override,
+            eager_config={
+                "enabled": getattr(defaults.dream, "eager_consolidation", False),
+                "min_messages": getattr(defaults.dream, "eager_min_messages", 3),
+                "min_interval_s": getattr(defaults.dream, "eager_min_interval_s", 120),
+                "max_batch": getattr(defaults.dream, "eager_max_batch", 20),
+            },
             restart_mode=config.gateway.restart_mode,
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
@@ -1938,6 +1946,12 @@ class AgentLoop:
                     replay_max_messages=replay_max_messages_for_context(
                         runtime.context_window_tokens
                     ),
+                )
+            )
+            self.schedule_background(
+                self.consolidator.maybe_eager_consolidate(
+                    session,
+                    runtime=runtime,
                 )
             )
         self._clear_pending_user_turn(session)

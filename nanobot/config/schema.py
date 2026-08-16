@@ -66,6 +66,25 @@ class DreamConfig(Base):
         validation_alias=AliasChoices("modelOverride", "model", "model_override"),
     )  # Model preset name for Dream sessions
 
+    # Eager (proactive) consolidation: archive new messages to history.jsonl
+    # after each turn, so short sessions land in long-term memory too.
+    eager_consolidation: bool = Field(
+        default=False,
+        description="Enable eager (proactive) consolidation after each response",
+    )
+    eager_min_messages: int = Field(
+        default=3, ge=1,
+        description="Minimum new messages before eager consolidation runs",
+    )
+    eager_min_interval_s: int = Field(
+        default=120, ge=0,
+        description="Minimum seconds between eager consolidation runs per session",
+    )
+    eager_max_batch: int = Field(
+        default=20, ge=1,
+        description="Maximum messages per eager consolidation batch",
+    )
+
     def build_schedule(self, timezone: str) -> CronSchedule:
         """Build the runtime schedule, preferring the legacy cron override if present."""
         if self.cron:

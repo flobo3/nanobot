@@ -760,12 +760,12 @@ class TelegramChannel(BaseChannel):
                     await self._remove_reaction(msg.chat_id, int(reply_to_message_id))
 
         try:
-            chat_id = int(msg.chat_id)
+            chat_id, thread_id_from_chat = self._resolve_thread_id(msg.chat_id)
         except ValueError:
             self.logger.exception("Invalid chat_id: {}", msg.chat_id)
             return
         reply_to_message_id = msg.metadata.get("message_id")
-        message_thread_id = msg.metadata.get("message_thread_id")
+        message_thread_id = thread_id_from_chat or msg.metadata.get("message_thread_id")
         if message_thread_id is None and reply_to_message_id is not None:
             message_thread_id = self._message_threads.get((msg.chat_id, reply_to_message_id))
         thread_kwargs: dict[str, int] = {}
@@ -945,6 +945,34 @@ class TelegramChannel(BaseChannel):
     def _is_not_modified_error(exc: Exception) -> bool:
         return isinstance(exc, BadRequest) and "message is not modified" in str(exc).lower()
 
+    def _resolve_thread_id(self, chat_id: str) -> tuple[int, int | None]:
+        """Parse chat_id and extract thread_id from chat_id format.
+
+        Supports "chat_id:topic:thread_id" and "chat_id_thread_id" forms so
+        cron jobs / message tool can target a specific forum topic by chat_id.
+
+        Returns (int_chat_id, message_thread_id_or_None).
+        """
+        raw = str(chat_id)
+        message_thread_id: int | None = None
+
+        if ":topic:" in raw:
+            parts = raw.split(":topic:")
+            raw = parts[0]
+            message_thread_id = int(parts[1])
+        elif "_" in raw:
+            parts = raw.split("_")
+            if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+                raw = parts[0]
+                message_thread_id = int(parts[1])
+        elif ":" in raw:
+            parts = raw.split(":")
+            if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+                raw = parts[0]
+                message_thread_id = int(parts[1])
+
+        return int(raw), message_thread_id
+
     async def send_delta(
         self,
         chat_id: str,
@@ -960,7 +988,8 @@ class TelegramChannel(BaseChannel):
         if not self._app:
             return
         meta = metadata or {}
-        int_chat_id = int(chat_id)
+        int_chat_id, chat_thread_id = self._resolve_thread_id(chat_id)
+        resolved_thread_id = chat_thread_id or meta.get("message_thread_id")
 
         if stream_end and merge_next:
             if not delta:
@@ -977,7 +1006,7 @@ class TelegramChannel(BaseChannel):
                 with suppress(ValueError):
                     await self._remove_reaction(chat_id, int(reply_to_message_id))
             thread_kwargs: dict[str, int] = {}
-            if message_thread_id := meta.get("message_thread_id"):
+            if message_thread_id := resolved_thread_id:
                 thread_kwargs["message_thread_id"] = message_thread_id
             raw_text = buf.text
 
@@ -1064,14 +1093,22 @@ class TelegramChannel(BaseChannel):
 
         now = time.monotonic()
         stream_thread_kwargs: dict[str, int] = {}
-        if message_thread_id := meta.get("message_thread_id"):
+        if message_thread_id := resolved_thread_id:
             stream_thread_kwargs["message_thread_id"] = message_thread_id
         if buf.message_id is None:
             preview = _strip_md_block(buf.text)
+            reply_params = None
+            reply_to_message_id = meta.get("message_id")
+            if reply_to_message_id and self.config.reply_to_message:
+                reply_params = ReplyParameters(
+                    message_id=int(reply_to_message_id),
+                    allow_sending_without_reply=True,
+                )
             try:
                 sent = await self._call_with_retry(
                     self._app.bot.send_message,
                     chat_id=int_chat_id, text=preview,
+                    reply_parameters=reply_params,
                     **stream_thread_kwargs,
                 )
                 buf.message_id = sent.message_id
