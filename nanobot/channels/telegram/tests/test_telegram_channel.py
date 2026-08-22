@@ -2214,6 +2214,58 @@ async def test_send_delta_mid_stream_strips_markdown() -> None:
     assert "1. step" in edited_text
 
 
+async def test_send_delta_concurrent_topics_keep_isolated_buffers() -> None:
+    """Concurrent streams in two forum topics of one chat must not mix.
+
+    Regression: _stream_bufs was keyed by bare chat_id, so deltas from
+    topic A appended into topic B's preview message (and vice versa)
+    whenever two topics of the same group streamed simultaneously.
+    """
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
+        MessageBus(),
+    )
+    channel._app = _FakeApp(lambda: None)
+    channel._app.bot.send_message = AsyncMock(
+        side_effect=[SimpleNamespace(message_id=11), SimpleNamespace(message_id=22)]
+    )
+    channel._app.bot.edit_message_text = AsyncMock()
+
+    chat = "-100200"
+    await channel.send_delta(
+        chat, "topic-one ", metadata={"message_thread_id": 101}, stream_id="s1"
+    )
+    await channel.send_delta(
+        chat, "topic-two ", metadata={"message_thread_id": 202}, stream_id="s2"
+    )
+
+    # Each topic owns its own streaming buffer, not one shared per chat.
+    assert channel._stream_bufs[f"{chat}:topic:101"].text == "topic-one "
+    assert channel._stream_bufs[f"{chat}:topic:202"].text == "topic-two "
+    assert channel._app.bot.send_message.await_count == 2
+    first_kwargs = channel._app.bot.send_message.call_args_list[0].kwargs
+    second_kwargs = channel._app.bot.send_message.call_args_list[1].kwargs
+    assert first_kwargs["message_thread_id"] == 101
+    assert second_kwargs["message_thread_id"] == 202
+
+    # Interleaved deltas stay in their own topic's buffer.
+    await channel.send_delta(
+        chat, "more-one", metadata={"message_thread_id": 101}, stream_id="s1"
+    )
+    await channel.send_delta(
+        chat, "more-two", metadata={"message_thread_id": 202}, stream_id="s2"
+    )
+    assert channel._stream_bufs[f"{chat}:topic:101"].text == "topic-one more-one"
+    assert channel._stream_bufs[f"{chat}:topic:202"].text == "topic-two more-two"
+
+    # Stream end in one topic leaves the other topic's stream untouched.
+    await channel.send_delta(
+        chat, "", metadata={"message_thread_id": 101}, stream_id="s1", stream_end=True
+    )
+    assert f"{chat}:topic:101" not in channel._stream_bufs
+    assert f"{chat}:topic:202" in channel._stream_bufs
+
+
 def test_build_keyboard_respects_inline_keyboards_flag() -> None:
     """``_build_keyboard`` returns ``None`` whenever the feature flag is off,
     regardless of whether buttons are provided; returns a proper Markup only

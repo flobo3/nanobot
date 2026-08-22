@@ -473,7 +473,7 @@ class TelegramChannel(BaseChannel):
         self._message_threads: dict[tuple[str, int], int] = {}
         self._bot_user_id: int | None = None
         self._bot_username: str | None = None
-        self._stream_bufs: dict[str, _StreamBuf] = {}  # chat_id -> streaming state
+        self._stream_bufs: dict[str, _StreamBuf] = {}  # chat_id[:topic:N] -> streaming state
         self._inbound_buffers: dict[str, list[_QueuedTelegramUpdate]] = {}
         self._inbound_workers: dict[str, asyncio.Task[None]] = {}
         self._rich_send_disabled: bool = False  # Latch off if Bot API < 10.1
@@ -990,18 +990,26 @@ class TelegramChannel(BaseChannel):
         meta = metadata or {}
         int_chat_id, chat_thread_id = self._resolve_thread_id(chat_id)
         resolved_thread_id = chat_thread_id or meta.get("message_thread_id")
+        # Streaming state is topic-scoped: concurrent streams in different
+        # forum topics of the same chat must not share one buffer, otherwise
+        # deltas from one stream leak into another topic's preview message.
+        stream_key = (
+            f"{int_chat_id}:topic:{resolved_thread_id}"
+            if resolved_thread_id is not None
+            else str(int_chat_id)
+        )
 
         if stream_end and merge_next:
             if not delta:
                 return
             stream_end = False
         if stream_end:
-            buf = self._stream_bufs.get(chat_id)
+            buf = self._stream_bufs.get(stream_key)
             if not buf or not buf.message_id or not buf.text:
                 return
             if stream_id is not None and buf.stream_id is not None and buf.stream_id != stream_id:
                 return
-            self._stop_typing(chat_id)
+            self._stop_typing(str(int_chat_id))
             if reply_to_message_id := meta.get("message_id"):
                 with suppress(ValueError):
                     await self._remove_reaction(chat_id, int(reply_to_message_id))
@@ -1030,7 +1038,7 @@ class TelegramChannel(BaseChannel):
                         )
                     except Exception:
                         pass  # Preview stays if delete fails
-                    self._stream_bufs.pop(chat_id, None)
+                    self._stream_bufs.pop(stream_key, None)
                     return
 
             # Legacy path: edit existing streaming message with HTML
@@ -1048,8 +1056,8 @@ class TelegramChannel(BaseChannel):
                 # Network errors (TimedOut, NetworkError) should propagate immediately
                 # to avoid doubling connection demand during pool exhaustion.
                 if self._is_not_modified_error(e):
-                    self.logger.debug("Final stream edit already applied for {}", chat_id)
-                    self._stream_bufs.pop(chat_id, None)
+                    self.logger.debug("Final stream edit already applied for {}", stream_key)
+                    self._stream_bufs.pop(stream_key, None)
                     return
                 self.logger.debug("Final stream edit failed (HTML), trying plain: {}", e)
                 # Fall back to raw markdown (not HTML) so users don't see raw tags.
@@ -1077,13 +1085,13 @@ class TelegramChannel(BaseChannel):
                 except Exception:
                     # Fall back to _send_text which handles HTML→plain gracefully.
                     await self._send_text(int_chat_id, extra_html_chunk)
-            self._stream_bufs.pop(chat_id, None)
+            self._stream_bufs.pop(stream_key, None)
             return
 
-        buf = self._stream_bufs.get(chat_id)
+        buf = self._stream_bufs.get(stream_key)
         if buf is None or (stream_id is not None and buf.stream_id is not None and buf.stream_id != stream_id):
             buf = _StreamBuf(stream_id=stream_id)
-            self._stream_bufs[chat_id] = buf
+            self._stream_bufs[stream_key] = buf
         elif buf.stream_id is None:
             buf.stream_id = stream_id
         buf.text += delta
